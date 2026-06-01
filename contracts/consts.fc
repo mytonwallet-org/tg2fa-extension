@@ -1,0 +1,24 @@
+const op::install = "op::install"c;
+const op::internal_signed = "op::internal_signed"c;
+const op::confirm_removal = "op::confirm_removal"c;
+const op::send_actions = "op::send_actions"c;
+const op::remove_extension = "op::remove_extension"c;
+const op::recovery = "op::recovery"c;
+const op::cancel_recovery = "op::cancel_recovery"c;
+
+const int err::unauthorized = 401;
+const int err::extension_already_installed = 700;
+const int err::sender_is_not_owner = 701;
+const int err::wrong_signature = 702;
+const int err::wrong_seqno = 703;
+const int err::expired = 704;
+const int err::recovery_in_progress = 705;
+const int err::action_timeout = 710;
+const int err::only_send_actions_supported = 711;
+
+const slice VERIFICATION_MESSAGE_PREFIX = "5267393577:WebAppData";
+const int TELEGRAM_PUBKEY = 0xe7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d;
+const int SIGN_TTL = 5 * 60;  ;; TTL 5 min
+
+const ONE_DAY = 60 * 60 * 24;
+const config::RECOVERY_TIMEOUT = ONE_DAY * 14;

@@ -1,0 +1,447 @@
+#include "imports/stdlib.fc";
+#include "imports/shared.fc";
+#include "consts.fc";
+
+const int GAS_WALLET_PROCESS_BASE = 3545;
+const int GAS_WALLET_PROCESS_PER_ACTION = 717;
+const int GAS_WALLET_PROCESS_PER_ACTION_EXT = 2000;
+
+const int INSTALL_PLUGIN_GAS_USAGE = 4128;
+const int CONFIRM_REMOVAL_GAS_USAGE = 3406;
+
+int concat_hash(builder b1, builder b2, int n) asm "HASHEXT_SHA256";
+slice get_last_bits(slice s, int n) asm "SDCUTLAST";
+slice remove_last_bits(slice s, int n) asm "SDSKIPLAST";
+
+(int) string_to_int(slice str) inline {
+  int result = 0;
+
+  repeat(str.slice_bits() / 8) {
+    int char = str~load_uint(8);
+    result = (result * 10) + (char - 48);
+  }
+
+  return result;
+}
+
+(slice) create_verification_message(slice auth_date, slice telegram_id, int hash) inline {
+  builder part1 = begin_cell()
+    .store_slice(VERIFICATION_MESSAGE_PREFIX)
+    .store_uint(10, 8).store_slice("auth_date=").store_slice(auth_date)
+    .store_uint(10, 8).store_slice("init_data={");
+
+
+  part1 = part1
+    .store_uint(34, 8).store_slice("user").store_uint(34, 8).store_slice(":{")
+      .store_uint(34, 8).store_slice("id").store_uint(34, 8).store_slice(":").store_slice(telegram_id)
+    .store_slice("}");
+
+  builder part2 = begin_cell()
+    .store_slice("}")
+      .store_uint(10, 8).store_slice("payload=").store_uint(hash, 256);
+
+  int hash = concat_hash(part1, part2, 2);
+
+  return begin_cell().store_uint(hash, 256).end_cell().begin_parse();
+}
+
+(int, slice, slice, int, int, slice) load_data() {
+  slice ds = get_data().begin_parse();
+  return (
+    ds~load_uint(32),   ;; seqno
+    ds~load_msg_addr(), ;; wallet
+    ds~load_ref().begin_parse(),   ;; telegram_id
+    ds~load_uint(256),  ;; seed pubkey
+    ds~load_uint(1),    ;; is_recovery_started?
+    ds                  ;; other data
+  );
+}
+
+() save_data(
+  int seqno,
+  slice wallet_addr,
+  slice telegram_id,
+  int seed_pubkey,
+  int is_recovery_started?,
+  slice state
+) impure {
+  set_data(
+    begin_cell()
+      .store_uint(seqno, 32)
+      .store_slice(wallet_addr)
+      .store_ref(begin_cell().store_slice(telegram_id).end_cell())
+      .store_uint(seed_pubkey, 256)
+      .store_uint(is_recovery_started?, 1)
+      .store_slice(state)
+      .end_cell()
+  );
+}
+
+(slice, slice) check_2fa(slice cs, slice stored_telegram_id, int stored_seqno, int seed_pubkey) inline {
+  ;; get signatures
+  slice telegram_signature = cs.get_last_bits(512);
+  cs = cs.remove_last_bits(512);
+  slice seed_signature = cs~load_ref().begin_parse();
+
+  ;; get auth_date (dynamic value, so excluded from hash)
+  slice auth_date_slice = cs~load_ref().begin_parse();
+
+  int hash = slice_hash(cs);
+
+  cs~load_uint(32);
+  int seqno = cs~load_uint(32);
+  slice payload = cs~load_ref().begin_parse();
+
+  slice message = create_verification_message(auth_date_slice, stored_telegram_id, hash);
+
+  throw_unless(err::wrong_signature, check_signature(hash, seed_signature, seed_pubkey));
+  throw_unless(err::wrong_signature, check_data_signature(message, telegram_signature, TELEGRAM_PUBKEY));
+
+  throw_unless(err::wrong_seqno, stored_seqno == seqno);
+
+  int auth_date_int = string_to_int(auth_date_slice);
+  throw_if(err::expired, now() - auth_date_int > SIGN_TTL);
+
+  return (cs, payload);
+}
+
+(slice, ()) validate_seed_signature(slice cs, int stored_seqno, int seed_pubkey) inline {
+  slice signature = cs.get_last_bits(512);
+  cs = cs.remove_last_bits(512);
+  int hash = slice_hash(cs);
+
+  cs~load_uint(32); ;; skip opcode
+  int seqno = cs~load_uint(32);
+  int valid_until = cs~load_uint(32);
+
+  throw_unless(err::wrong_signature, check_signature(hash, signature, seed_pubkey));
+  throw_unless(err::wrong_seqno, stored_seqno == seqno);
+  throw_unless(err::expired, now() < valid_until);
+
+  return (cs, ());
+}
+
+() handle_request(slice in_msg, int is_external?) impure inline {
+  int op = in_msg.preload_uint(32);
+
+  (
+    int seqno,
+    slice wallet_addr,
+    slice telegram_id,
+    int seed_pubkey,
+    int is_recovery_started?,
+    slice rest_state
+  ) = load_data();
+
+  if (op == op::send_actions) {
+    throw_if(err::recovery_in_progress, is_recovery_started?);
+
+    slice out_action = in_msg~check_2fa(telegram_id, seqno, seed_pubkey);
+    in_msg.end_parse();
+
+    accept_message();
+
+    save_data(
+      seqno + 1,
+      wallet_addr,
+      telegram_id,
+      seed_pubkey,
+      is_recovery_started?,
+      rest_state
+    );
+    commit();
+
+    int mode = out_action~load_uint(8);
+    cell msg = out_action~load_ref();
+    
+    send_raw_message(msg, mode);
+
+    return ();
+  }
+
+  throw_unless(err::only_send_actions_supported, is_external?);
+
+  if (op == op::recovery) {
+    in_msg~validate_seed_signature(seqno, seed_pubkey);
+    in_msg.end_parse();
+
+    int blocked_until = rest_state~load_uint(64);
+    throw_if(err::action_timeout, now() <= blocked_until);
+
+    ifnot (is_recovery_started?) {
+      accept_message();
+
+      slice state = begin_cell()
+        .store_uint(now() + config::RECOVERY_TIMEOUT, 64)
+        .end_cell()
+        .begin_parse();
+
+      save_data(
+        seqno + 1,
+        wallet_addr,
+        telegram_id,
+        seed_pubkey,
+        1,
+        state
+      );
+    } else {
+      accept_message();
+
+      slice state = begin_cell()
+        .store_uint(0, 64)
+        .end_cell()
+        .begin_parse();
+
+      save_data(
+        seqno + 1,
+        wallet_addr,
+        telegram_id,
+        seed_pubkey,
+        0,
+        state
+      );
+      commit();
+
+      ;; remove extension
+      var confirmation_msg = begin_cell()
+        .store_nonbounce_flags()
+        .store_slice(my_address())
+        .store_coins(get_compute_fee(0, CONFIRM_REMOVAL_GAS_USAGE))
+        .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+        .store_uint(op::confirm_removal, 32)
+        .end_cell();
+
+      var msg = begin_cell()
+        .store_nonbounce_flags()
+        .store_slice(wallet_addr)
+        .store_coins(
+          get_compute_fee(
+            0,
+            GAS_WALLET_PROCESS_BASE * 3
+            + GAS_WALLET_PROCESS_PER_ACTION * 1
+            + GAS_WALLET_PROCESS_PER_ACTION_EXT * 2
+          )
+        )
+        .store_ref_body(
+          begin_cell()
+            .store_uint(op::wallet::request_by_extension, 32)
+            .store_uint(0, 64)
+            .store_out_action_list(
+              new_out_action_send_msg(
+                begin_cell().end_cell(),
+                PAY_FEE_SEPARATELY | IGNORE_ACTION_ERRORS,
+                confirmation_msg
+              )
+            )
+            .store_int(-1, 1)
+            .store_set_signature_auth(
+              1,
+              begin_cell()
+                .store_delete_ext_action(
+                  my_address(),
+                  null()
+                ).end_cell()
+            )
+            .end_cell()
+        );
+
+      send_raw_message(msg.end_cell(), PAY_FEE_SEPARATELY);
+    }
+
+    return ();
+  }
+
+  if (op == op::cancel_recovery) {
+    in_msg~validate_seed_signature(seqno, seed_pubkey);
+    in_msg.end_parse();
+
+    throw_unless(err::recovery_in_progress, is_recovery_started?);
+
+    accept_message();
+
+    slice state = begin_cell()
+      .store_uint(now() + ONE_DAY, 64)
+      .end_cell()
+      .begin_parse();
+
+    save_data(
+      seqno + 1,
+      wallet_addr,
+      telegram_id,
+      seed_pubkey,
+      0,
+      state
+    );
+
+    return ();
+  }
+
+  if (op == op::remove_extension) {
+    throw_if(err::recovery_in_progress, is_recovery_started?);
+
+    in_msg~check_2fa(telegram_id, seqno, seed_pubkey);
+    in_msg.end_parse();
+
+    accept_message();
+
+    var confirmation_msg = begin_cell()
+      .store_nonbounce_flags()
+      .store_slice(my_address())
+      .store_coins(get_compute_fee(0, CONFIRM_REMOVAL_GAS_USAGE))
+      .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+      .store_uint(op::confirm_removal, 32)
+      .end_cell();
+
+    var msg = begin_cell()
+      .store_nonbounce_flags()
+      .store_slice(wallet_addr)
+      .store_coins(
+        get_compute_fee(
+          0,
+          GAS_WALLET_PROCESS_BASE * 3
+          + GAS_WALLET_PROCESS_PER_ACTION * 1
+          + GAS_WALLET_PROCESS_PER_ACTION_EXT * 2
+        )
+      )
+      .store_ref_body(
+        begin_cell()
+          .store_uint(op::wallet::request_by_extension, 32)
+          .store_uint(0, 64)
+          .store_out_action_list(
+            new_out_action_send_msg(
+              begin_cell().end_cell(),
+              PAY_FEE_SEPARATELY | IGNORE_ACTION_ERRORS,
+              confirmation_msg
+            )
+          )
+          .store_int(-1, 1)
+          .store_set_signature_auth(
+            1,
+            begin_cell()
+              .store_delete_ext_action(
+                my_address(),
+                null()
+              ).end_cell()
+          )
+          .end_cell()
+      );
+
+    send_raw_message(msg.end_cell(), PAY_FEE_SEPARATELY);
+
+    return ();
+  }
+
+  throw(0xffff);
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+  if (slice_empty?(in_msg_body)) {
+      return ();
+  }
+
+  var cs = in_msg_full.begin_parse();
+  cs~load_uint(4); ;; skip flags
+  slice sender = cs~load_msg_addr();
+
+  (
+    int seqno,
+    slice wallet_addr,
+    slice telegram_id,
+    int seed_pubkey,
+    int is_recovery_started?,
+    slice rest_state
+  ) = load_data();
+
+  int op = in_msg_body~load_uint(32);
+
+  if (op == op::internal_signed) {
+    handle_request(in_msg_body, 0);
+    return ();
+  }
+
+  if (op == op::install) {
+    throw_unless(err::extension_already_installed, seqno == 0);
+    throw_unless(err::sender_is_not_owner, equal_slice_bits(wallet_addr, sender));
+
+    save_data(
+      seqno + 1,
+      wallet_addr,
+      telegram_id,
+      seed_pubkey,
+      is_recovery_started?,
+      rest_state
+    );
+
+    (int wc, int _hash) = parse_std_addr(my_address());
+
+    cell msg = begin_cell()
+      .store_nonbounce_flags()
+      .store_slice(wallet_addr)
+      .store_coins(get_compute_fee(wc, GAS_WALLET_PROCESS_BASE * 3 + GAS_WALLET_PROCESS_PER_ACTION_EXT))
+      .store_ref_body(
+        begin_cell()
+          .store_uint(op::wallet::request_by_extension, 32)
+          .store_uint(0, 64)
+          .store_out_action_list(null())
+          .store_int(-1, 1)
+          .store_set_signature_auth(
+              0,
+              null()
+          )
+          .end_cell()
+      )
+      .end_cell();
+
+    send_raw_message(msg, PAY_FEE_SEPARATELY);
+
+    return ();
+  }
+
+  if (op == op::confirm_removal) {
+    throw_unless(err::sender_is_not_owner, equal_slice_bits(sender, wallet_addr));
+
+    var msg = begin_cell()
+      .store_nonbounce_flags()
+      .store_slice(wallet_addr)
+      .store_coins(0)
+      .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+      .end_cell();
+
+    send_raw_message(msg, CARRY_CONTRACT_BALANCE | DESTROY_IF_BALANCE_ZERO);
+
+    return ();
+  }
+
+  throw(0xffff);
+}
+
+() recv_external(slice in_msg) impure {
+  return handle_request(in_msg, 1);
+}
+
+;; Get methods
+
+(int, int) get_recovery_state() method_id {
+  (
+    _, _, _, _,
+    int is_recovery_started?,
+    slice rest_state
+  ) = load_data();
+
+  return (
+    is_recovery_started?,
+    rest_state~load_uint(64)
+  );
+}
+
+(int) get_seqno() method_id {
+  (int seqno, _, _, _, _, _) = load_data();
+
+  return seqno;
+}
+
+(int) get_telegram_id() method_id {
+  (_, _, slice telegram_id_slice, _, _, _) = load_data();
+
+  return string_to_int(telegram_id_slice);
+}
