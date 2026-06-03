@@ -10,19 +10,18 @@ import { formatCoinsPure } from '@ton/sandbox/dist/utils/printTransactionFees';
 
 const sharedSeed = Buffer.from('ZPR3kjVuq52XSUuoh/7YNpuUOWxRioFWe5Wnt1oSTZY=', 'base64');
 
-// TODO: update signatures
 const removalReqSigned = {
-    authDate: 1776249181,
+    authDate: 1780527990,
     signature: Buffer.from(
-        'D841VGGTlIfsOw_78fmCw3bb8-FPj28jONApM1tw5fg4gIaY7Kv-EDFS4p0b-P-JqTHCGD47gb3LwlzGY_g5Dw',
+        'bUTicG1vV590agLi1BjmG0ys32FX83z9KZgX8iI4M-G8V3mXjQ1Sh83oJEPKOUr8vM_ylK5qnr9rhrgsRyjQBg',
         'base64',
     ),
 };
 
 const sendActionsSigned = {
-    authDate: 1776249198,
+    authDate: 1780527991,
     signature: Buffer.from(
-        'RMmJddGqEe661kG3UpGs_AL65WFXYUt9qOwXQr-0XhWorjo-SJZd-Yx6L3IlmebqWAgOFoe1gK6aBw_nWt_PCw',
+        'zZgwZVxeut5FpfEul0gQZGxtd6VBx0BQGLLCrRFLNzOCxGy3JkR7_nBBP8eke6-fCW0GowhGJQsh1h6IcWFcAg',
         'base64',
     ),
 };
