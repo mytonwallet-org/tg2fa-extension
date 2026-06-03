@@ -16,7 +16,7 @@ const int err::recovery_in_progress = 705;
 const int err::action_timeout = 710;
 const int err::only_send_actions_supported = 711;
 
-const slice VERIFICATION_MESSAGE_PREFIX = "5267393577:WebAppData";
+const slice VERIFICATION_MESSAGE_PREFIX = "8657366177:WebAppData";
 const int TELEGRAM_PUBKEY = 0xe7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d;
 const int SIGN_TTL = 5 * 60;  ;; TTL 5 min
 
