@@ -24,3 +24,7 @@
 ### Add a new contract
 
 `npx blueprint create ContractName` or `yarn blueprint create ContractName`
+
+### Credits
+
+Inpired by [mytonwalletorg/push-escrow-contract](https://github.com/mytonwalletorg/push-escrow-contract/blob/master/contracts) and [tonkeeper/2fa-extension](https://github.com/tonkeeper/2fa-extension/tree/main/contracts).
